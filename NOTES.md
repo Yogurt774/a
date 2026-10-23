@@ -1,5 +1,69 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Handoff 2026-10-24 (late): boots on the Note 13 4G but no iOS frame; quiet-console kernel + DT-dump shim ready
+
+- Extracted the real iPhone X device tree from the IPSW (`Firmware/all_flash/DeviceTree.d22ap.im4p`,
+  33719 B IM4P, LZFSE `bvx2` payload) to `research/ipsw-x/d22ap.adt` (186084 B) with python `lzfse`
+  in a throwaway venv, so `tools/mkadt.py` now finds `/product` (iPhone X identity) instead of
+  warning and emitting the tree without it.
+- Built, in this order (all local, no CI):
+  - `shim/out/topaz.adt` — `python3 tools/mkadt.py shim/out/topaz.adt --highmem` (9688 B;
+    dram-base 0x140000000, size 0x100000000, display-scale 3, /product present).
+  - `shim/out/payload.bin` — `python3 tools/mkpayload.py ~/k-test/kernel.development.sweet
+    shim/out/topaz.adt shim/out/payload.bin --cmdline '<see below>'` (17440176 B;
+    virt_base 0xfffffe0006000000, entry 0xfffffe00074ca488).
+  - `shim/out/shim-boot.img` — `MKBOOTIMG=mkbootimg shim/build.sh ../shim/out/payload.bin`
+    (17633280 B, boot v4, header 1584, kernel Image 17624496 B at offset 4096, `image_size`
+    patched at Image+16, payload found inside the boot image; ramdisk 97 B empty newc cpio).
+- Boot args used: `debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0
+  unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1
+  launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30`.
+- `ios16-root.simg` (12145189204 B) built earlier from IPSW 087-86698-044 / 087-86593-047 /
+  087-86715-047 + `sweet-root-tweaks.py` was flashed to `userdata` (24 sparse chunks, 447 s).
+- **Booted twice on the user's Redmi Note 13 4G (`sapphire`/`sapphiren`, SM6225/SD685, *not*
+  a Note 12 4G / `topaz`). No panic.** shim → XNU → launchd → backboardd → dozens of daemons
+  (`securityd`, `identityservicesd`, `CommCenterMobileHelper`, `softwareupdated`, `maild`,
+  `healthd`, `remindd`, …), `SweetHIDTouch`/`SweetHIDButtons` opened by
+  `IOHIDEventServiceUserClient`. Panel scans out at ~124 Hz (`SWEET INTF1: 621 frames in 5 s`).
+  **But no iOS frame is ever presented:** `sweet_console_muted` is only set on the first
+  AppleCLCD swap (patch 0067), and the console keeps scrolling, so backboardd never swaps.
+- Why the screen is unreadable: every AppleKeyStore call logs a line
+  (`IOLog("SWEET AKS: …")`, patch 0038), which floods the console and scrolls the interesting
+  lines off. **Fixed locally:** that per-call `IOLog` is removed from
+  `xnu/patches/0038-sweet-applekeystore.patch` (added-file hunk 227 → 223) so a quiet kernel
+  can be CI-built and the next boot photographed.
+- Live USB log is **not available on this phone**: `sweetusb=2` (`shim/out/shim-boot-usb.img`)
+  never enumerates a `1209:0001` device (polled `lsusb` for 120 s after `fastboot boot`); the
+  sweet USB gadget does not come up on Note 13. The recovery pull (`sweet-log-pull.sh`) needs a
+  `sapphire` recovery, none of the GitHub recovery trees ship a ready image (no releases).
+- Touch hardware identified offline: `TeamWin/android_device_xiaomi_sapphire@android-12.1`
+  has `prebuilt/{dtb.img,dtbo.img}` (base Khaje DTB + 52 overlays). Touch is on
+  `qupv3_se2_i2c` (QUP0 SE2), IRQ GPIO 0x50, reset 0x56 for Novatek (`novatek@62`,
+  `novatek,NVT-ts`) and Synaptics (`synaptics_tcm@20`, `synaptics,tcm-i2c`); FocalTech
+  (`focaltech,fts`) also present. Which one `sapphire` really uses is only decidable from the
+  live DTB (the overlays are selected by `qcom,board-id`, and the base DTB has no model id).
+- **New diagnostic boot image (built, not yet booted):** `shim/out/shim-boot-dtdump.img`
+  (17637376 B). `shim/fdt.c:fdt_dump_touch()` walks the *live* DTB ABL hands over, clears the
+  screen and prints `MODEL`/`COMPAT`/`BOARDID`/`MSMID`, every `qcom,i2c-touch-active`, and for
+  up to two touch nodes the node name, parent, `compatible`, `status`, `reg`, `interrupts` and
+  all `*gpio*`/`*avdd*`/`*vdd*` properties as hex cells, then holds the screen for 60 s before
+  booting XNU. Built by setting the gate in `shim/shim.c` unconditional; the committed source
+  keeps it behind `fdt_bootarg_has(dtb, "sweetdtdump=1")`, which never matches because the
+  shim sees ABL's bootargs, not the payload's — temporarily set it to `1` and rebuild for a
+  dump image. Verified against the extracted overlays with a host harness (`/tmp/opencode/dttest`).
+- Next actions:
+  1. `fastboot boot shim/out/shim-boot-dtdump.img`, photograph the black screen (60 s hold) →
+     exact touch chip, I2C address, IRQ/reset GPIOs and rails for `sapphire`.
+  2. Build the quiet kernel (patch 0038 change is committed on `topaz`), payload + shim, boot,
+     and photograph the console after ~5 min: we need `SWEET FB:` lines (`AppleCLCD … presented`,
+     `swap …`, `N swaps`) or a `CRASH`/`SMP` line to explain why backboardd never swaps.
+  3. If the note-13 panel needs different display init than `topaz`, compare the live DTB's
+     `qcom,mdss_dsi_*`/`dsi-display-primary` nodes against the topaz values; `SWEET INTF1`
+     already proves the panel/DSI scanout works and only the AppleCLCD/MDP present path is
+     unverified.
+  4. Port `bsd/dev/sweet_touch.c` (topaz = FocalTech FT5452, patches 0083/0086/0090/0950) to
+     the chip the DT dump names.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

@@ -7,7 +7,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 name=${1:?usage: kbuild.sh NAME [LABEL="boot-args"]...}; shift
-repo=MakrSas/ios-topaz
+repo=Yogurt774/a
 base="debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_hz=60"
 head=$(git rev-parse HEAD)
 [ "$(git rev-parse origin/topaz)" = "$head" ] || { echo "push topaz first" >&2; exit 1; }

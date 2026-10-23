@@ -11,6 +11,7 @@
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
+#include "fdt.h"
 
 #define IMEM_RESTART_REASON	0x0c12565cUL	/* qcom,msm-imem@c125000 restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
@@ -513,6 +514,14 @@ void shim_main(uint64_t dtb)
 	uint64_t mmfr0 = rsr("id_aa64mmfr0_el1");
 	con_hex2("MMFR0", "lo=", (uint32_t)mmfr0, "tg16=", (mmfr0 >> 20) & 0xf);
 	con_hex2("MIDR", "el1=", (uint32_t)rsr("midr_el1"), "mpidr=", (uint32_t)rsr("mpidr_el1"));
+
+	/* Hardware identification: root model/board-id + touch nodes. */
+	if (fdt_bootarg_has(dtb, "sweetdtdump=1")) {
+		fdt_dump_touch(dtb);
+		con_str("HOLD", "sweetdtdump: 60 s, photo this screen");
+		delay_ms(60000);
+	}
+
 	if (((mmfr0 >> 20) & 0xf) == 0) {
 		con_str("SILVER", "no 16K granule: handing off to gold CPU 0x100");
 		con_skip();
