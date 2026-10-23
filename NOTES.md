@@ -51,18 +51,48 @@
   keeps it behind `fdt_bootarg_has(dtb, "sweetdtdump=1")`, which never matches because the
   shim sees ABL's bootargs, not the payload's — temporarily set it to `1` and rebuild for a
   dump image. Verified against the extracted overlays with a host harness (`/tmp/opencode/dttest`).
+- **Live DTB of the user's phone (booted `shim/out/shim-boot-dtdump.img`, photographed
+  2026-10-24 late):**
+  ```
+  MODEL   Qualcomm Technologies, Inc. Khaje IDP
+  COMPAT  qcom,khaje-idp
+  MSMID   0000024A 00010000   00000206 00010000
+  BOARDID 00030022 00000000
+  ACTIVE  synaptics,tcm-i2c
+  NODE synaptics_tcm@20  IN i2c@4a88000   compatible synaptics,tcm-i2c
+       reg 00000020 | interrupts 00000050 00002008
+       synaptics,irq-gpio   00000082 00000050 00002008
+       synaptics,reset-gpio 00000082 00000056 00000000
+  NODE novatek@62        IN i2c@4a88000   status ok   reg 00000062
+       interrupts 00000050 00002008
+       novatek,reset-gpio 00000082 00000056 00000000
+       novatek,irq-gpio   00000082 00000050 00002008
+       compatible novatek,NVT-ts
+  ```
+  So board-id **0x30022**, `compatible qcom,khaje-idp`, touch bus **i2c@4a88000 = QUP0 SE2**,
+  IRQ **GPIO 80**, reset **GPIO 86** (both on tlmm), and the DTB marks
+  `qcom,i2c-touch-active = "synaptics,tcm-i2c"` while also enabling `novatek@62`. The GPIOs
+  are exactly the ones the topaz FocalTech driver already uses, so the bus/reset code is
+  reusable; only the chip protocol (Synaptics TCM vs FocalTech) differs. Note the two "prebuilt"
+  `dtbo.img`/`dtb.img` in the sapphire and tapas recovery trees are **byte-identical**
+  (sha256 `9bb64953…`/`64aba513…`), i.e. Xiaomi ships one shared khaje DTBO, so the offline
+  overlays cannot tell topaz and sapphire apart — the live dump above does.
+- Kernel probe added (patch 0089): after the bus/reset/rail come up, read one byte from 0x20
+  (Synaptics TCM) and 0x62 (Novatek) and log the error, so the next boot says which chip ACKs.
+  Image in progress via CI (run for `c954ee6`) → `shim/out/shim-boot-quietprobe.img`
+  (quiet console + the two new probes).
 - Next actions:
-  1. `fastboot boot shim/out/shim-boot-dtdump.img`, photograph the black screen (60 s hold) →
-     exact touch chip, I2C address, IRQ/reset GPIOs and rails for `sapphire`.
-  2. Build the quiet kernel (patch 0038 change is committed on `topaz`), payload + shim, boot,
-     and photograph the console after ~5 min: we need `SWEET FB:` lines (`AppleCLCD … presented`,
-     `swap …`, `N swaps`) or a `CRASH`/`SMP` line to explain why backboardd never swaps.
-  3. If the note-13 panel needs different display init than `topaz`, compare the live DTB's
+  1. `fastboot boot shim/out/shim-boot-quietprobe.img`, look at the red shim screen for the
+     `SWEET TOUCH: probe 0x20 …` / `probe 0x62 …` lines (chip identification), then photograph
+     the console after ~5 min: we need `SWEET FB:` lines (`AppleCLCD … presented`, `swap …`,
+     `N swaps`) or a `CRASH`/`SMP` line to explain why backboardd never swaps.
+  2. If the note-13 panel needs different display init than `topaz`, compare the live DTB's
      `qcom,mdss_dsi_*`/`dsi-display-primary` nodes against the topaz values; `SWEET INTF1`
      already proves the panel/DSI scanout works and only the AppleCLCD/MDP present path is
      unverified.
-  4. Port `bsd/dev/sweet_touch.c` (topaz = FocalTech FT5452, patches 0083/0086/0090/0950) to
-     the chip the DT dump names.
+  3. Port `bsd/dev/sweet_touch.c` (topaz = FocalTech FT5452, patches 0083/0086/0090/0950) to
+     the chip the probe identifies — likely Synaptics TCM at 0x20 (TouchComm protocol), which
+     is a new driver; the GENI bus/reset/IRQ code and `sweet_hid_touch()` stay the same.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
