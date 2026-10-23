@@ -1,5 +1,38 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Handoff 2026-10-24 (night): shim reads the kernel's persistent console ring from userdata
+
+- Problem: on the Note 13 4G the console (either the filtered `shim-boot-logf.img`
+  or the kernel screen) shows only the last ~50 rows and the layout is confusing
+  (screen content identical at 1:00/2:01/3:00 while the phone clock ran). The
+  ordered full log is in the kernel's 4 MiB ring in `userdata` (patch 0047), but
+  there is no recovery/adb for `sapphire` and `sweetusb=2` never enumerates.
+- **New shim tool: `ufs_log_dump()` in `shim/ufs.c`** (called from `shim/shim.c`
+  behind the never-matching gate `fdt_bootarg_has(dtb, "sweetlogdump=1")`, same
+  pattern as the DT dump). It takes over the UFS host like `test_ufs()`, reads the
+  GPT on LUN 0, finds `userdata`, computes
+  `base = first + nblocks - 1025` (the kernel's ring area), checks the
+  `SWEETLOG` header (u32 version @8, **u32 ring size @12 little-endian**,
+  u64 total @16), copies the last 32 KiB of the stream (following the wrap) and
+  prints the last 20 lines containing `SWEET`/`CRASH`/`panic`/`SMP`/`FPS`,
+  oldest first, two console rows per line (a long line shows its first 44 chars
+  and `~` + its last 43, so nothing important scrolls off).
+  `con_raw()`/`con_str()` in `shim/console.c` draw the rows.
+- **Algorithm verified offline** with a Python replica of the exact C
+  (`/tmp/opencode/logsim.py`): synthetic rings, with and without wrap
+  (total 100 … 100000, size 4096), match the ground truth for every case.
+  Earlier bug caught this way: `size` is little-endian (native struct write),
+  not big-endian like the SCSI/GPT fields.
+- **Built `shim/out/shim-boot-logdump.img`** (249856 B, no XNU payload so it
+  cannot overwrite the ring): it dumps, holds the screen 180 s, then
+  `reset()`s back to fastboot by itself. Built by temporarily forcing the gate
+  to `1` (as with the DT dump); the committed source keeps the gate closed.
+  `shim/out/shim-boot.img` was rebuilt from the committed (gated) source.
+- Next action: with the phone in fastboot, `fastboot boot shim/out/shim-boot-logdump.img`
+  and photograph the screen — that is the **ordered** tail of the previous boot's
+  log (including whether the 90 s `SMP` sampler ever ran), the decisive input for
+  "kernel hung vs idle" and "why backboardd never swaps".
+
 ## Handoff 2026-10-24 (late): boots on the Note 13 4G but no iOS frame; quiet-console kernel + DT-dump shim ready
 
 - Extracted the real iPhone X device tree from the IPSW (`Firmware/all_flash/DeviceTree.d22ap.im4p`,

@@ -150,6 +150,11 @@ static uint64_t le64(const uint8_t *p)
 	return v;
 }
 
+static uint32_t le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
 /* Name the filesystem whose superblock starts at block lba (f2fs/ext4). */
 static const char *fs_type(uint32_t lba)
 {
@@ -263,4 +268,226 @@ void test_ufs(void)
 	if (esz != 128 || nent > 128)
 		return;
 	list_partitions(elba, nent);
+}
+
+/* ------------------------------------------------------------------ */
+/* Persistent console ring (kernel patch 0047) reader.                */
+/*
+ * The kernel keeps the last 4 MiB + 4 KiB of every console line in the
+ * userdata partition: device block 0 of that area is a header
+ * ("SWEETLOG", u32 version, u32 ring size, u64 total bytes written,
+ * u64 flush sequence) and the ring follows. Byte n of the console
+ * stream lives at ring offset n % size, so the newest text is right
+ * before offset total % size. Boot this shim after a run that hung and
+ * before the next one: it reads the ring left from that run.
+ */
+
+#define SWEETLOG_BLOCKS	1025u		/* 1 header block + 4 MiB ring */
+#define LOG_WIN		32768u		/* bytes of the stream we scan */
+#define LOG_COLS	44		/* console columns at scale 3 (1080/24) */
+#define LOG_MAXLINES	20
+
+static uint8_t log_win[LOG_WIN] __attribute__((aligned(4096)));
+static uint8_t log_blk[BLOCK] __attribute__((aligned(4096)));
+static uint8_t log_ents[128 * 128] __attribute__((aligned(4096)));
+
+/* Same takeover test as test_ufs(), minus the reporting. */
+static int log_host_ready(void)
+{
+	uint32_t hcs = ufs_rd(REG_HCS), hce = ufs_rd(REG_HCE);
+	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY))
+		return 1;
+	if (ufs_rd(REG_UTRLDBR))
+		return 2;
+	ufs_wr(REG_UTRLRSR, 0);
+	uintptr_t list = (uintptr_t)utrl;
+	ufs_wr(REG_UTRLBA, (uint32_t)list);
+	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
+	ufs_wr(REG_UTRLRSR, 1);
+	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
+	    !(ufs_rd(REG_UTRLRSR) & 1))
+		return 3;
+	static const uint8_t tur[6] = { 0 };
+	uint32_t ocs, st;
+	for (int i = 0; i < 3; i++)
+		if (!scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st))
+			return 0;
+	return 4;
+}
+
+/* Byte-wise compare/substring: no libc (no memcmp) in a freestanding image. */
+static int log_eq(const uint8_t *a, const char *b, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; i++)
+		if (a[i] != (uint8_t)b[i])
+			return 0;
+	return 1;
+}
+
+static int log_has(const uint8_t *s, uint32_t n, const char *w, uint32_t wl)
+{
+	for (uint32_t i = 0; i + wl <= n; i++) {
+		uint32_t j = 0;
+		while (j < wl && s[i + j] == (uint8_t)w[j])
+			j++;
+		if (j == wl)
+			return 1;
+	}
+	return 0;
+}
+
+static int log_interesting(const uint8_t *s, uint32_t n)
+{
+	return log_has(s, n, "SWEET", 5) || log_has(s, n, "CRASH", 5) ||
+	       log_has(s, n, "panic", 5) || log_has(s, n, "SMP", 3) ||
+	       log_has(s, n, "FPS", 3);
+}
+
+/* One log line on the console: first LOG_COLS chars, and for longer lines
+ * the tail (the values usually sit there) as a second row, so a wrapped line
+ * never pushes the newer lines off the screen. */
+static void log_print(const uint8_t *s, uint32_t n)
+{
+	char buf[LOG_COLS + 1];
+
+	if (!n) {
+		con_raw("");
+		return;
+	}
+	uint32_t first = n < LOG_COLS ? n : LOG_COLS;
+	for (uint32_t i = 0; i < first; i++)
+		buf[i] = (s[i] >= 32 && s[i] < 127) ? (char)s[i] : '.';
+	buf[first] = 0;
+	con_raw(buf);
+	if (n <= LOG_COLS)
+		return;
+	buf[0] = '~';
+	uint32_t start = n - (LOG_COLS - 1);
+	for (uint32_t i = 0; i < LOG_COLS - 1; i++)
+		buf[i + 1] = (s[start + i] >= 32 && s[start + i] < 127) ? (char)s[start + i] : '.';
+	buf[LOG_COLS] = 0;
+	con_raw(buf);
+}
+
+void ufs_log_dump(void)
+{
+	con_str("LOGDUMP", "reading the SWEETLOG ring from userdata");
+
+	int rc = log_host_ready();
+	if (rc) {
+		con_hex2("LOGDUMP", "host rc=", (uint32_t)rc, 0, 0);
+		return;
+	}
+
+	/* GPT header, then the entries; find "userdata". */
+	if (read_blocks(0, 2, data)) {
+		con_str("LOGDUMP", "GPT header read error");
+		return;
+	}
+	const uint8_t *gpt = data + BLOCK;
+	if (!log_eq(gpt, "EFI PART", 8)) {
+		con_str("LOGDUMP", "no GPT signature");
+		return;
+	}
+	uint32_t nent = gpt[80] | gpt[81] << 8 | gpt[82] << 16;
+	uint32_t elba = gpt[72] | gpt[73] << 8;
+	if (gpt[84] != 128 || gpt[85] != 0 || nent == 0 || nent > 128) {
+		con_str("LOGDUMP", "unexpected GPT entry size");
+		return;
+	}
+	if (read_blocks(elba, (nent * 128 + BLOCK - 1) / BLOCK, log_ents)) {
+		con_str("LOGDUMP", "GPT entries read error");
+		return;
+	}
+	uint64_t first = 0, last = 0;
+	for (uint32_t i = 0; i < nent; i++) {
+		const uint8_t *e = log_ents + i * 128;
+		char name[17];
+		for (int c = 0; c < 16; c++) {
+			uint8_t ch = e[56 + 2 * c];
+			name[c] = (ch >= 32 && ch < 127) ? (char)ch : 0;
+		}
+		name[16] = 0;
+		if (!__builtin_strcmp(name, "userdata")) {
+			first = le64(e + 32);
+			last = le64(e + 40);
+			break;
+		}
+	}
+	if (!first || last < first) {
+		con_str("LOGDUMP", "no userdata partition");
+		return;
+	}
+	uint64_t base = first + (last - first + 1) - SWEETLOG_BLOCKS;
+	con_hex2("LOGDUMP", "first=", (uint32_t)first, "n=", (uint32_t)(last - first + 1));
+	con_hex("LOGDUMP base", base);
+
+	if (read_blocks((uint32_t)base, 1, log_blk)) {
+		con_str("LOGDUMP", "log header read error");
+		return;
+	}
+	if (!log_eq(log_blk, "SWEETLOG", 8)) {
+		con_str("LOGDUMP", "no SWEETLOG magic (never flushed?)");
+		return;
+	}
+	uint32_t size = le32(log_blk + 12);
+	uint64_t total = le64(log_blk + 16);
+	if (!size || size > 16 * 1024 * 1024) {
+		con_hex2("LOGDUMP", "bad ring size=", size, 0, 0);
+		return;
+	}
+
+	/* Copy the last LOG_WIN bytes of the stream, following the wrap. */
+	uint32_t len = total > LOG_WIN ? LOG_WIN : (uint32_t)total;
+	uint64_t n = total - len;
+	uint32_t done = 0;
+	while (n < total) {
+		uint32_t r = (uint32_t)(n % size);
+		uint32_t off = r % BLOCK;
+		if (read_blocks((uint32_t)(base + 1 + r / BLOCK), 1, log_blk)) {
+			con_str("LOGDUMP", "ring read error");
+			return;
+		}
+		uint32_t chunk = BLOCK - off;
+		if (chunk > len - done)
+			chunk = len - done;
+		for (uint32_t i = 0; i < chunk; i++)
+			log_win[done + i] = log_blk[off + i];
+		done += chunk;
+		n += chunk;
+	}
+
+	/* One pass: keep the last LOG_MAXLINES interesting line starts. */
+	uint32_t ring[LOG_MAXLINES];
+	uint32_t seen = 0, s = 0;
+	for (uint32_t i = 0; i <= done; i++) {
+		if (i != done && log_win[i] != '\n')
+			continue;
+		uint32_t m = i - s;
+		while (m && log_win[s + m - 1] == '\r')
+			m--;
+		if (m && log_interesting(log_win + s, m)) {
+			ring[seen % LOG_MAXLINES] = s;
+			seen++;
+		}
+		s = i + 1;
+	}
+
+	uint32_t np = seen < LOG_MAXLINES ? seen : LOG_MAXLINES;
+	con_hex2("LOGDUMP", "total=", (uint32_t)total, "keep=", (uint32_t)np);
+	if (!np) {
+		con_str("LOGDUMP", "no SWEET/CRASH/SMP lines in window");
+		return;
+	}
+	/* Draw the kept lines oldest-first so time reads downward. */
+	for (uint32_t k = 0; k < np; k++) {
+		s = ring[(seen - np + k) % LOG_MAXLINES];
+		uint32_t e = s;
+		while (e < done && log_win[e] != '\n')
+			e++;
+		uint32_t m = e - s;
+		while (m && log_win[s + m - 1] == '\r')
+			m--;
+		log_print(log_win + s, m);
+	}
 }

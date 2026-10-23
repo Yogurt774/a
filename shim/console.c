@@ -73,6 +73,13 @@ void con_str(const char *label, const char *s)
 	row++;
 }
 
+/* One line of raw text from column 0 (for log dumps; no label). */
+void con_raw(const char *s)
+{
+	put_str(0, s, WHITE);
+	row++;
+}
+
 void con_hex(const char *label, uint64_t v)
 {
 	char buf[17];

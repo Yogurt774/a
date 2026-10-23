@@ -522,6 +522,14 @@ void shim_main(uint64_t dtb)
 		delay_ms(60000);
 	}
 
+	/* Previous boot's persistent console ring (patch 0047), for a hang. */
+	if (fdt_bootarg_has(dtb, "sweetlogdump=1")) {
+		ufs_log_dump();
+		con_str("HOLD", "sweetlogdump: 180 s, then fastboot");
+		delay_ms(180000);
+		reset(20);
+	}
+
 	if (((mmfr0 >> 20) & 0xf) == 0) {
 		con_str("SILVER", "no 16K granule: handing off to gold CPU 0x100");
 		con_skip();
