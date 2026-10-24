@@ -1,0 +1,133 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -1,7 +1,10 @@
+ static char sweet_log_ring[SWEET_LOG_SIZE];
+ static uint64_t _Atomic sweet_log_total;
+ static int sweet_log_chan;
+ static uint32_t sweet_log_secs = SWEET_LOG_SECS;
++static uint32_t sweet_log_errors;               /* failed flushes, retried */
++static uint64_t _Atomic sweet_log_last_flush;   /* total at the last good flush */
++static void sweet_hb_start(void);
+ 
+ /* Called for all console output, any context: never blocks. */
+ void sweet_log_append(const char *c, int size);
+@@ -1,7 +1,11 @@
+ 		lck_mtx_unlock(&sweet_ufs_lock);
+ 		if (error) {
+-			printf("SWEET LOG: write failed (%d), stopping\n", error);
+-			return;
++			sweet_log_errors++;
++			if (sweet_log_errors <= 4) {
++				printf("SWEET LOG: write failed (%d), retrying\n", error);
++			}
++			continue;
+ 		}
+ 		flushed = total;
++		os_atomic_store(&sweet_log_last_flush, total, relaxed);
+ 	}
+@@ -1,7 +1,8 @@
+ static void
+ sweet_log_start(void)
+ {
+ 	uint32_t on = 1;
+ 	thread_t thread;
+ 
++	sweet_hb_start();
+ 	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
+@@ -1,7 +1,96 @@
+ 	if (kernel_thread_start(sweet_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
+ }
+ 
++/*
++ * topaz: liveness beacon, started with boot-arg sweethb=1.
++ *
++ * "HB a" is appended once a second straight to the ring, with no printf and
++ * no locks, so it still arrives when the console path is wedged. A second
++ * thread prints "SWEETHB p" with the same numbers through printf, i.e.
++ * through the console, so it is drawn when the log filter matches SWEETHB.
++ * t is seconds, rd the ring total (every console byte, from any thread), wr
++ * what the flush thread has written to the partition and e its failed
++ * flushes. t growing while rd does not means printf itself is stuck; rd
++ * growing while wr does not means the log flush is stuck; t stopping means
++ * the whole kernel stopped.
++ */
++static int sweet_hb_chan;
++static int sweet_hb2_chan;
++
++static int
++sweet_hb_num(char *p, uint64_t v)
++{
++	char tmp[24];
++	int n = 0, i;
++
++	do {
++		tmp[n++] = (char)('0' + (int)(v % 10));
++		v /= 10;
++	} while (v != 0);
++	for (i = 0; i < n; i++) {
++		p[i] = tmp[n - 1 - i];
++	}
++	return n;
++}
++
++static void
++sweet_hb_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t t = 0, rd, w;
++	char line[64];
++	int n;
++
++	for (;;) {
++		(void)tsleep(&sweet_hb_chan, PZERO, "sweethb", hz);
++		t++;
++		rd = os_atomic_load(&sweet_log_total, relaxed);
++		w = os_atomic_load(&sweet_log_last_flush, relaxed);
++		n = 0;
++		memcpy(line + n, "HB a t=", 7); n += 7;
++		n += sweet_hb_num(line + n, t);
++		memcpy(line + n, " rd=", 4); n += 4;
++		n += sweet_hb_num(line + n, rd);
++		memcpy(line + n, " wr=", 4); n += 4;
++		n += sweet_hb_num(line + n, w);
++		memcpy(line + n, " e=", 3); n += 3;
++		n += sweet_hb_num(line + n, sweet_log_errors);
++		line[n++] = '\n';
++		sweet_log_append(line, n);
++	}
++}
++
++/* The printf beacon must not be able to wedge the appending one. */
++static void
++sweet_hb2_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t t = 0;
++
++	for (;;) {
++		(void)tsleep(&sweet_hb2_chan, PZERO, "sweethb2", hz * 5);
++		t += 5;
++		printf("SWEETHB p t=%llu rd=%llu wr=%llu e=%u\n", t,
++		    os_atomic_load(&sweet_log_total, relaxed),
++		    os_atomic_load(&sweet_log_last_flush, relaxed), sweet_log_errors);
++	}
++}
++
++static void
++sweet_hb_start(void)
++{
++	uint32_t on = 0;
++	thread_t thread;
++
++	if (!PE_parse_boot_argn("sweethb", &on, sizeof(on)) || on == 0) {
++		return;
++	}
++	if (kernel_thread_start(sweet_hb_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++	if (kernel_thread_start(sweet_hb2_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
+ /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
+ int sweet_ufs_rootdev(dev_t *dev);
