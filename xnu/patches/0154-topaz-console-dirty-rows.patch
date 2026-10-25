@@ -1,0 +1,32 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 4193f57..ae30ded 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3364,9 +3364,25 @@ sweet_console_copy_dirty(void *dst)
+ 	/* under the putc lock: a scroll repaints the whole screen inside one
+ 	 * locked character, so the copy never catches it half done */
+ 	VCPUTC_LOCK_LOCK();
+-	int dirty = sweet_dirty_bottom > sweet_dirty_top;
++	int dirty = vinfo.v_rows != 0 && sweet_dirty_bottom > sweet_dirty_top;
+ 	if (dirty) {
+-		memcpy(dst, (const void *)sweet_shadow_va, (size_t)vinfo.v_rowbytes * vinfo.v_height);
++		/*
++		 * topaz: only the rows that changed. This runs on every vsync, and
++		 * the whole-panel copy (10 MB here) sat under the putc lock, so a
++		 * single printf had to wait for it. A band is v_height/v_rows rows.
++		 */
++		unsigned int top = sweet_dirty_top, bottom = sweet_dirty_bottom;
++		size_t band = (size_t)(vinfo.v_height / vinfo.v_rows) * vinfo.v_rowbytes;
++		if (top >= vinfo.v_rows || bottom <= top) {
++			dirty = 0;
++		} else {
++			if (bottom > vinfo.v_rows) {
++				bottom = vinfo.v_rows;
++			}
++			memcpy((char *)dst + (size_t)top * band,
++			    (const char *)sweet_shadow_va + (size_t)top * band,
++			    (size_t)(bottom - top) * band);
++		}
+ 	}
+ 	sweet_dirty_top = ~0u;
+ 	sweet_dirty_bottom = 0;

@@ -43,7 +43,7 @@ rm -rf "$k"; mkdir -p "$k"
 gh run download -R $repo "$run" -n xnu-kernel -D "$k"
 for v in "$@"; do
   label=${v%%=*}; extra=${v#*=}
-  python3 tools/mkpayload.py "$k/kernel.development.sweet" shim/out/topaz-x2.adt "shim/out/payload-$name-$label.bin" --cmdline "$base $extra" >/dev/null
-  (cd shim && ./build.sh "../shim/out/payload-$name-$label.bin" >/dev/null && cp out/shim-boot.img "../../shim-boot-$name-$label.img")
+  python3 tools/mkpayload.py "$k/kernel.development.sweet" shim/out/topaz.adt "shim/out/payload-$name-$label.bin" --cmdline "$base $extra" >/dev/null
+  (cd shim && MKBOOTIMG=${MKBOOTIMG:-mkbootimg} ./build.sh "../shim/out/payload-$name-$label.bin" >/dev/null && cp out/shim-boot.img "../../shim-boot-$name-$label.img")
   ls -la "../shim-boot-$name-$label.img"
 done

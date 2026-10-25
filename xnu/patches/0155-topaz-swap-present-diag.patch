@@ -1,0 +1,68 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 1d3ee17..dad6cac 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -54,6 +54,9 @@ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* Red
+  * one vsync after the next frame replaced it on the panel.
+  */
+ static uint64_t sweet_fps_tick;         /* mach time of the last vsync tick (SWEET FPS) */
++static uint64_t sweet_fb_swapend_count; /* SwapEnd calls reaching swap() */
++static uint64_t sweet_fb_swap_count;    /* SwapEnd calls (diagnostic) */
++static uint64_t sweet_fb_present_count; /* present() calls: 0 => no iOS frame yet */
+ 
+ /* boot-arg sweetfb_nohold=1 (a test): frames on the panel are not marked in use */
+ static bool
+@@ -507,6 +510,21 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		    frames - fb->fIntfFrames, fb->fIntf1[(0x800 + 0x0b0) / 4], fb->fIntf1[0x800 / 4]);
+ 		fb->fIntfFrames = frames;
+ 	}
++	/*
++	 * topaz: is iOS drawing at all? SwapEnd -> swap() -> present(). The
++	 * console keeps drawing only while present() has never run, so a
++	 * present count of 0 with swaps at 0 means backboardd never rendered.
++	 */
++	if ((count % 300) == 0) {
++		IOLog("SWEET SWP: t=%llu end=%llu shown=%llu present=%llu dirty=%d cons=%d clients=%u off=%d\n",
++		    (unsigned long long)(count / 300 * 5),
++		    (unsigned long long)sweet_fb_swapend_count,
++		    (unsigned long long)sweet_fb_swap_count,
++		    (unsigned long long)sweet_fb_present_count,
++		    fb->fDirty ? 1 : 0, fb->fConsShown ? 1 : 0,
++		    (unsigned)(fb->fClients ? fb->fClients->getCount() : 0),
++		    fb->fPowerOff ? 1 : 0);
++	}
+ 	if (fb->fPowerOff) {
+ 		/*
+ 		 * topaz: fade in cached memory and flip whole frames to the MDP.
+@@ -735,7 +753,6 @@ get32(const uint8_t *p, uint32_t off)
+ }
+ 
+ static uint32_t sweet_fb_swaps_logged;
+-static uint64_t sweet_fb_swap_count;
+ 
+ /* Copy each enabled layer's surface into the panel memory (no scaling). */
+ /*
+@@ -798,6 +815,11 @@ sweet_fps_count(void)
+ void
+ AppleCLCD::swap(const uint8_t *rec)
+ {
++	if (sweet_fb_swapend_count++ < 4) {
++		IOLog("SWEET FB: SwapEnd #%llu mask %#x id %u\n",
++		    (unsigned long long)sweet_fb_swapend_count, get32(rec, 0x104),
++		    get32(rec, 0x50));
++	}
+ 	sweet_fps_count();
+ 	SweetSurface *held[4] = {};
+ 	uint32_t mask = get32(rec, 0x104);
+@@ -1311,6 +1333,11 @@ AppleCLCD::present(const uint8_t *rec)
+ 	uint32_t mask = get32(rec, 0x104);
+ 	static int console_only = -1;
+ 
++	if (sweet_fb_present_count++ < 8) {
++		IOLog("SWEET FB: present #%llu mask %#x\n",
++		    (unsigned long long)sweet_fb_present_count, mask);
++	}
++
+ 	/* boot-arg sweetfb_console=1: debugging, the panel keeps showing the kernel console */
+ 	if (console_only < 0) {
+ 		console_only = 0;
