@@ -1,0 +1,31 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 4710f0b..5379712 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7569,7 +7569,25 @@ process_signature(proc_t p, struct image_params *imgp)
+ 			}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 			/* SWEET runs every iOS binary this way: one short line per exec. */
+-			printf("exec %s\n", p->p_name);
++			if (strcmp(p->p_name, "xpcproxy") == 0) {
++				/*
++				 * topaz: which service is this proxy for? launchd waits for a
++				 * job to check in before it starts the next one, so a single
++				 * xpcproxy that never reaches its execve stalls the whole
++				 * spawn queue -- and only the label says which service that was.
++				 */
++				const char *a = imgp->ip_startargv, *end = imgp->ip_endargv;
++				const char *label = "?";
++				if (a != NULL && end != NULL && a < end) {
++					a += strnlen(a, (size_t)(end - a)) + 1;   /* argv[0] */
++					if (a < end && *a != '\0') {
++						label = a;
++					}
++				}
++				printf("exec xpcproxy %s (pid %d)\n", label, p->p_pid);
++			} else {
++				printf("exec %s\n", p->p_name);
++			}
+ 			/* topaz: does the window server get our library (GPU's OpenGL ES)? */
+ 			if (strcmp(p->p_name, "backboardd") == 0 && imgp->ip_endargv != NULL && imgp->ip_endenvv != NULL) {
+ 				const char *e = imgp->ip_endargv, *end = imgp->ip_endenvv;
